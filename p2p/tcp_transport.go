@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 )
 
 // TCPPeer represent node lain yang terhubung melalui koneksi TCP.
@@ -22,25 +23,33 @@ func NewTCPPeer(conn net.Conn, outbound bool) *TCPPeer {
 	}
 }
 
+func (p *TCPPeer) Close() error {
+	return p.conn.Close()
+}
+
 type TCPTransportOpts struct {
 	ListenAddr    string
 	HandshakeFunc HandshakeFunc
 	Decoder       Decoder
+	OnPeer        func(peer Peer) error
 }
 
 type TCPTransport struct {
 	TCPTransportOpts
 	listener net.Listener
-	decoder  Decoder
-
-	mu    sync.RWMutex
-	peers map[net.Addr]Peer
+	rpcch    chan RPC
 }
 
 func NewTCPTransport(opts TCPTransportOpts) *TCPTransport {
 	return &TCPTransport{
 		TCPTransportOpts: opts,
+		rpcch:            make(chan RPC),
 	}
+}
+
+// Consume return read only channel for reading incoming message receive from another peer
+func (t *TCPTransport) Consume() <-chan RPC {
+	return t.rpcch
 }
 
 func (t *TCPTransport) ListenAndAccept() error {
@@ -71,25 +80,37 @@ func (t *TCPTransport) startAcceptLoop() {
 type Temp struct{}
 
 func (t *TCPTransport) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	var err error
+
+	defer func() {
+		fmt.Printf("dropping the connection: %s\n", err)
+		defer conn.Close()
+	}()
+
 	peer := NewTCPPeer(conn, true)
 
 	if err := t.HandshakeFunc(peer); err != nil {
-		fmt.Printf("TCP handshake error: %s\n", err)
 		return
 	}
 
-	fmt.Fprintf(conn, "Welcome to the server!\n\n")
+	if t.OnPeer != nil {
+		if err = t.OnPeer(peer); err != nil {
+			fmt.Fprintln(conn, "error dropping connection!") // Kirim error ke client
+			time.Sleep(100 * time.Millisecond)
+			return
+		}
+	}
 
-	msg := &Message{}
+	fmt.Fprintln(conn, "Welcome to the server!")
+	msg := RPC{}
 	for {
-		if err := t.Decoder.Decode(conn, msg); err != nil {
+		if err = t.Decoder.Decode(conn, &msg); err != nil {
 			fmt.Fprintf(conn, "Error reading message: %s\n", err)
-			break
+			return
 		}
 
 		msg.From = conn.RemoteAddr().String()
-		fmt.Printf("message received: %+v\n", msg)
+		t.rpcch <- msg
 	}
 
 }

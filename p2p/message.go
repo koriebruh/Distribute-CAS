@@ -5,7 +5,7 @@ const (
 	IncomingStream  = 0x2
 )
 
-type Message struct {
+type RPC struct {
 	From    string
 	Payload []byte
 }
